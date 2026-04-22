@@ -1,10 +1,16 @@
 using UnityEngine;
 using Unity.Netcode; // We must add this to use Networking!
 
+public enum PlayerRole
+{
+    None,
+    PlayerX,
+    PlayerY
+}
+
 // Change MonoBehaviour to NetworkBehaviour
 public class PlayerController : NetworkBehaviour 
 {
-    public enum PlayerRole { PlayerX, PlayerY }
     
     [Header("Role Settings")]
     // NetworkVariables sync automatically across all clients
@@ -44,6 +50,13 @@ public class PlayerController : NetworkBehaviour
     // This runs automatically the moment the player connects to the network
     public override void OnNetworkSpawn()
     {
+        if (IsOwner)
+        {
+            // When I spawn, attach a CameraController to the Main Camera and tell it to follow ME
+            CameraController cam = Camera.main.gameObject.AddComponent<CameraController>();
+            cam.SetTarget(this.transform, currentRole.Value);
+        }
+
         // ONLY the Server is allowed to assign roles
         if (IsServer)
         {
@@ -62,9 +75,7 @@ public class PlayerController : NetworkBehaviour
 
     void Update()
     {
-
-        // --- NEW: Smart Initialization ---
-        // If this is our first frame, OR if the server just changed our role...
+        // --- Smart Initialization ---
         if (!hasInitialized || currentRole.Value != lastAssignedRole)
         {
             lastAssignedRole = currentRole.Value;
@@ -74,78 +85,75 @@ public class PlayerController : NetworkBehaviour
             if (currentRole.Value == PlayerRole.PlayerX)
             {
                 sr.color = Color.blue;
-                // Move sensor to the bottom edge
                 groundCheck.localPosition = new Vector3(0f, -0.5f, 0f); 
             }
             else if (currentRole.Value == PlayerRole.PlayerY)
             {
                 sr.color = Color.red;
-                // Move sensor to the left edge
                 groundCheck.localPosition = new Vector3(-0.5f, 0f, 0f); 
             }
         }
         // ---------------------------------
 
-        // THE GOLDEN RULE OF NETWORKING: 
-        // If this character does not belong to the computer running this code, DO NOTHING.
         if (!IsOwner) return;
 
-        // Spacebar flips gravity. We call a ServerRpc so the server can tell EVERYONE to flip.
+        // 1. Check if we are touching the floor/wall/ceiling
+        isGrounded = Physics2D.OverlapCircle(groundCheck.position, groundCheckRadius, groundLayer);
+
+        // 2. Store the A/D input
+        inputDirection = Input.GetAxisRaw("Horizontal");
+
+        // --- NEW: DYNAMIC JUMP LOGIC ---
+        // If gravity is normal (-1), use W. If flipped (1), use S.
+        KeyCode currentJumpKey = (gravityMultiplier < 0) ? KeyCode.W : KeyCode.S;
+
+        if (currentRole.Value == PlayerRole.PlayerX)
+        {
+            // Normal = Jump Up. Flipped = Jump Down.
+            Vector2 jumpDirection = (gravityMultiplier < 0) ? Vector2.up : Vector2.down;
+            
+            if (Input.GetKeyDown(currentJumpKey) && isGrounded)
+            {
+                rb.AddForce(jumpDirection * jumpForce, ForceMode2D.Impulse);
+            }
+        }
+        else if (currentRole.Value == PlayerRole.PlayerY)
+        {
+            // Normal = Jump Right (away from left wall). Flipped = Jump Left (away from right wall).
+            Vector2 jumpDirection = (gravityMultiplier < 0) ? Vector2.right : Vector2.left;
+
+            if (Input.GetKeyDown(currentJumpKey) && isGrounded)
+            {
+                rb.AddForce(jumpDirection * jumpForce, ForceMode2D.Impulse);
+            }
+        }
+
+        // 4. GRAVITY FLIP LOGIC
         if (Input.GetKeyDown(KeyCode.Space))
         {
             FlipGravityServerRpc();
-        }
-
-        isGrounded = Physics2D.OverlapCircle(groundCheck.position, groundCheckRadius, groundLayer);
-
-        // Player X Inputs (Bottom Floor)
-        if (currentRole.Value == PlayerRole.PlayerX)
-        {
-            inputDirection = 0f;
-            if (Input.GetKey(KeyCode.D)) inputDirection = 1f;
-            else if (Input.GetKey(KeyCode.A)) inputDirection = -1f;
-
-            // W jumps UP, S falls DOWN
-            if (Input.GetKeyDown(KeyCode.W) && isGrounded)
-            {
-                rb.linearVelocity = new Vector2(rb.linearVelocity.x, jumpForce * (gravityMultiplier * -1));
-            }
-            isFastFalling = Input.GetKey(KeyCode.S);
-        }
-        
-        // Player Y Inputs (Left Wall)
-        else if (currentRole.Value == PlayerRole.PlayerY)
-        {
-            inputDirection = 0f;
-            // W moves UP the wall, S moves DOWN the wall
-            if (Input.GetKey(KeyCode.W)) inputDirection = 1f;
-            else if (Input.GetKey(KeyCode.S)) inputDirection = -1f;
-
-            // D jumps RIGHT (into the room), A falls LEFT (back to the wall)
-            if (Input.GetKeyDown(KeyCode.D) && isGrounded)
-            {
-                rb.linearVelocity = new Vector2(jumpForce * (gravityMultiplier * -1), rb.linearVelocity.y);
-            }
-            isFastFalling = Input.GetKey(KeyCode.A);
         }
     }
 
     void FixedUpdate()
     {
-        // Only the owner processes their own physics to prevent laggy movement
         if (!IsOwner) return;
 
         float currentGravity = gravityStrength;
         if (isFastFalling) currentGravity += fastFallBonus;
 
+        // 4. PHYSICS MOVEMENT LOGIC
         if (currentRole.Value == PlayerRole.PlayerX)
         {
+            // Player X moves normal (Left/Right on X axis)
             rb.linearVelocity = new Vector2(inputDirection * moveSpeed, rb.linearVelocity.y);
             rb.AddForce(new Vector2(0f, currentGravity * gravityMultiplier));
         }
         else if (currentRole.Value == PlayerRole.PlayerY)
         {
-            rb.linearVelocity = new Vector2(rb.linearVelocity.x, inputDirection * moveSpeed);
+            // Player Y moves visually Left/Right, which is technically Up/Down on the Y axis.
+            // We multiply by -moveSpeed because their camera is rotated -90 degrees!
+            rb.linearVelocity = new Vector2(rb.linearVelocity.x, inputDirection * -moveSpeed);
             rb.AddForce(new Vector2(currentGravity * gravityMultiplier, 0f));
         }
     }
