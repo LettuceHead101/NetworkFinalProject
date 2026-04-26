@@ -21,10 +21,13 @@ public class PlayerController : NetworkBehaviour
     );
 
     [Header("Movement Stats")]
-    public float moveSpeed = 7f;
+    public float moveSpeed = 20f;
     public float jumpForce = 12f;
-    public float gravityStrength = 25f;
+    public float gravityStrength = 20f;
     public float fastFallBonus = 30f;
+    public float acceleration = 20f;
+    public float deceleration = 4f;
+    private bool isExternalForceActive = false;
     
     [Header("Ground Detection")]
     public Transform groundCheck;
@@ -36,6 +39,16 @@ public class PlayerController : NetworkBehaviour
     private bool isFastFalling;
     private bool isGrounded;
     private float gravityMultiplier = -1f; 
+
+    // The synced death counter
+    public NetworkVariable<int> deathCount = new NetworkVariable<int>(0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+
+    // A method the KillZone can call to tell the Server we died
+    [ServerRpc]
+    public void AddDeathServerRpc()
+    {
+        deathCount.Value++;
+    }
     
     // Add these two new variables
     private PlayerRole lastAssignedRole;
@@ -73,7 +86,7 @@ public class PlayerController : NetworkBehaviour
         }
     }
 
-    void Update()
+void Update()
     {
         // --- Smart Initialization ---
         if (!hasInitialized || currentRole.Value != lastAssignedRole)
@@ -97,65 +110,86 @@ public class PlayerController : NetworkBehaviour
 
         if (!IsOwner) return;
 
-        // 1. Check if we are touching the floor/wall/ceiling
         isGrounded = Physics2D.OverlapCircle(groundCheck.position, groundCheckRadius, groundLayer);
 
-        // 2. Store the A/D input
-        inputDirection = Input.GetAxisRaw("Horizontal");
-
-        // --- NEW: DYNAMIC JUMP LOGIC ---
-        // If gravity is normal (-1), use W. If flipped (1), use S.
-        KeyCode currentJumpKey = (gravityMultiplier < 0) ? KeyCode.W : KeyCode.S;
-
-        if (currentRole.Value == PlayerRole.PlayerX)
+        // If an external force is pushing us (like a bounce pad), disable WASD input!
+        if (!isExternalForceActive)
         {
-            // Normal = Jump Up. Flipped = Jump Down.
-            Vector2 jumpDirection = (gravityMultiplier < 0) ? Vector2.up : Vector2.down;
-            
-            if (Input.GetKeyDown(currentJumpKey) && isGrounded)
+            inputDirection = Input.GetAxisRaw("Horizontal");
+
+            KeyCode currentJumpKey = (gravityMultiplier < 0) ? KeyCode.W : KeyCode.S;
+
+            if (currentRole.Value == PlayerRole.PlayerX)
             {
-                rb.AddForce(jumpDirection * jumpForce, ForceMode2D.Impulse);
+                Vector2 jumpDirection = (gravityMultiplier < 0) ? Vector2.up : Vector2.down;
+                if (Input.GetKeyDown(currentJumpKey) && isGrounded)
+                {
+                    rb.AddForce(jumpDirection * jumpForce, ForceMode2D.Impulse);
+                }
             }
-        }
-        else if (currentRole.Value == PlayerRole.PlayerY)
-        {
-            // Normal = Jump Right (away from left wall). Flipped = Jump Left (away from right wall).
-            Vector2 jumpDirection = (gravityMultiplier < 0) ? Vector2.right : Vector2.left;
-
-            if (Input.GetKeyDown(currentJumpKey) && isGrounded)
+            else if (currentRole.Value == PlayerRole.PlayerY)
             {
-                rb.AddForce(jumpDirection * jumpForce, ForceMode2D.Impulse);
+                Vector2 jumpDirection = (gravityMultiplier < 0) ? Vector2.right : Vector2.left;
+                if (Input.GetKeyDown(currentJumpKey) && isGrounded)
+                {
+                    rb.AddForce(jumpDirection * jumpForce, ForceMode2D.Impulse);
+                }
             }
         }
 
-        // 4. GRAVITY FLIP LOGIC
         if (Input.GetKeyDown(KeyCode.Space))
         {
             FlipGravityServerRpc();
         }
     }
 
-    void FixedUpdate()
+void FixedUpdate()
     {
         if (!IsOwner) return;
 
         float currentGravity = gravityStrength;
         if (isFastFalling) currentGravity += fastFallBonus;
 
-        // 4. PHYSICS MOVEMENT LOGIC
-        if (currentRole.Value == PlayerRole.PlayerX)
+        // --- STOLEN LOGIC: Only apply crisp WASD movement if no external force is active ---
+        if (!isExternalForceActive)
         {
-            // Player X moves normal (Left/Right on X axis)
-            rb.linearVelocity = new Vector2(inputDirection * moveSpeed, rb.linearVelocity.y);
-            rb.AddForce(new Vector2(0f, currentGravity * gravityMultiplier));
+            if (currentRole.Value == PlayerRole.PlayerX)
+            {
+                // Crisp, instant direct assignment (No Lerp!)
+                rb.linearVelocity = new Vector2(inputDirection * moveSpeed, rb.linearVelocity.y);
+                rb.AddForce(new Vector2(0f, currentGravity * gravityMultiplier));
+            }
+            else if (currentRole.Value == PlayerRole.PlayerY)
+            {
+                // Crisp, instant direct assignment (No Lerp!)
+                rb.linearVelocity = new Vector2(rb.linearVelocity.x, inputDirection * -moveSpeed);
+                rb.AddForce(new Vector2(currentGravity * gravityMultiplier, 0f));
+            }
         }
-        else if (currentRole.Value == PlayerRole.PlayerY)
+        else 
         {
-            // Player Y moves visually Left/Right, which is technically Up/Down on the Y axis.
-            // We multiply by -moveSpeed because their camera is rotated -90 degrees!
-            rb.linearVelocity = new Vector2(rb.linearVelocity.x, inputDirection * -moveSpeed);
-            rb.AddForce(new Vector2(currentGravity * gravityMultiplier, 0f));
+            // If external force IS active, still apply our custom gravity so we don't float away!
+            if (currentRole.Value == PlayerRole.PlayerX)
+            {
+                 rb.AddForce(new Vector2(0f, currentGravity * gravityMultiplier));
+            }
+            else 
+            {
+                 rb.AddForce(new Vector2(currentGravity * gravityMultiplier, 0f));
+            }
         }
+    }
+
+    // --- STOLEN LOGIC: Public Methods for Bounce Pads / Hazards ---
+    public void SetExternalForce(float duration)
+    {
+        isExternalForceActive = true;
+        Invoke(nameof(ReleaseExternalForce), duration);
+    }
+
+    private void ReleaseExternalForce()
+    {
+        isExternalForceActive = false;
     }
 
     // --- NETWORKING METHODS ---
