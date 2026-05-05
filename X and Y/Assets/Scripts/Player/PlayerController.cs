@@ -1,5 +1,7 @@
 using UnityEngine;
 using Unity.Netcode; // We must add this to use Networking!
+using System.Collections;
+using UnityEngine.SceneManagement; // Required for listening to level changes
 
 public enum PlayerRole
 {
@@ -8,12 +10,9 @@ public enum PlayerRole
     PlayerY
 }
 
-// Change MonoBehaviour to NetworkBehaviour
 public class PlayerController : NetworkBehaviour 
 {
-    
     [Header("Role Settings")]
-    // NetworkVariables sync automatically across all clients
     public NetworkVariable<PlayerRole> currentRole = new NetworkVariable<PlayerRole>(
         PlayerRole.PlayerX, 
         NetworkVariableReadPermission.Everyone, 
@@ -43,14 +42,12 @@ public class PlayerController : NetworkBehaviour
     // The synced death counter
     public NetworkVariable<int> deathCount = new NetworkVariable<int>(0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
 
-    // A method the KillZone can call to tell the Server we died
     [ServerRpc]
     public void AddDeathServerRpc()
     {
         deathCount.Value++;
     }
     
-    // Add these two new variables
     private PlayerRole lastAssignedRole;
     private bool hasInitialized = false;
 
@@ -60,33 +57,86 @@ public class PlayerController : NetworkBehaviour
         rb.gravityScale = 0f; 
     }
 
-    // This runs automatically the moment the player connects to the network
+    // --- NEW CAMERA & SCENE LOADING LOGIC STARTS HERE ---
+
     public override void OnNetworkSpawn()
+    {
+        // 1. Assign Roles (Server Only)
+        if (IsServer)
+        {
+            if (OwnerClientId == 0) currentRole.Value = PlayerRole.PlayerX;
+            else currentRole.Value = PlayerRole.PlayerY;
+        }
+
+        // 2. Setup Camera (Owner Only)
+        if (IsOwner)
+        {
+            AttachCamera(); // Grab the camera immediately for the first level
+            
+            // SUBSCRIBE TO THE EVENT: Listen for any future level changes!
+            SceneManager.sceneLoaded += OnSceneLoaded;
+        }
+    }
+
+    // We MUST unsubscribe when the player leaves the game to prevent memory leaks
+    public override void OnNetworkDespawn()
     {
         if (IsOwner)
         {
-            // When I spawn, attach a CameraController to the Main Camera and tell it to follow ME
-            CameraController cam = Camera.main.gameObject.AddComponent<CameraController>();
-            cam.SetTarget(this.transform, currentRole.Value);
+            SceneManager.sceneLoaded -= OnSceneLoaded;
         }
+    }
 
-        // ONLY the Server is allowed to assign roles
-        if (IsServer)
+    // This triggers automatically every single time a new level finishes loading
+    private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+    {
+        AttachCamera();
+
+        // --- NEW: Teleport to spawn immediately when the scene loads ---
+        if (IsOwner)
         {
-            // The Host is always assigned Client ID 0. 
-            if (OwnerClientId == 0)
+            // 1. Kill any momentum from the last level so they don't slide
+            if (rb != null)
             {
-                currentRole.Value = PlayerRole.PlayerX;
+                rb.linearVelocity = Vector2.zero;
             }
-            // Anyone else who joins gets Player Y
-            else
+
+            // 2. Snap them to their designated spawn points
+            if (currentRole.Value == PlayerRole.PlayerX)
             {
-                currentRole.Value = PlayerRole.PlayerY;
+                transform.position = new Vector3(0f, -2f, 0f); 
+            }
+            else if (currentRole.Value == PlayerRole.PlayerY)
+            {
+                transform.position = new Vector3(-2f, 0f, 0f); 
             }
         }
     }
 
-void Update()
+    // The actual logic to find the camera, safely separated into its own function
+    private void AttachCamera()
+    {
+        Camera mainCam = Camera.main;
+        
+        if (mainCam != null)
+        {
+            CameraController cam = mainCam.GetComponent<CameraController>();
+            if (cam == null)
+            {
+                cam = mainCam.gameObject.AddComponent<CameraController>();
+            }
+            cam.SetTarget(this.transform, currentRole.Value);
+        }
+        else
+        {
+            Debug.LogError("CRITICAL: Player loaded into " + SceneManager.GetActiveScene().name + ", but no object is tagged 'MainCamera'!");
+        }
+    }
+
+    // --- NEW CAMERA & SCENE LOADING LOGIC ENDS HERE ---
+
+
+    void Update()
     {
         // --- Smart Initialization ---
         if (!hasInitialized || currentRole.Value != lastAssignedRole)
@@ -141,34 +191,49 @@ void Update()
         {
             FlipGravityServerRpc();
         }
+
+        // --- NEW: Manual Respawn Key ---
+        if (Input.GetKeyDown(KeyCode.R))
+        {
+            // 1. The player teleports THEMSELVES locally first (bypasses network fights)
+            rb.linearVelocity = Vector2.zero;
+            
+            if (currentRole.Value == PlayerRole.PlayerX)
+            {
+                transform.position = new Vector3(0f, -2f, 0f); 
+            }
+            else if (currentRole.Value == PlayerRole.PlayerY)
+            {
+                transform.position = new Vector3(-2f, 0f, 0f); 
+            }
+
+            // 2. Tell the Server to handle the score and the flashing visuals
+            RequestRespawnServerRpc();
+        }
     }
 
-void FixedUpdate()
+    void FixedUpdate()
     {
         if (!IsOwner) return;
 
         float currentGravity = gravityStrength;
         if (isFastFalling) currentGravity += fastFallBonus;
 
-        // --- STOLEN LOGIC: Only apply crisp WASD movement if no external force is active ---
         if (!isExternalForceActive)
         {
             if (currentRole.Value == PlayerRole.PlayerX)
             {
-                // Crisp, instant direct assignment (No Lerp!)
                 rb.linearVelocity = new Vector2(inputDirection * moveSpeed, rb.linearVelocity.y);
                 rb.AddForce(new Vector2(0f, currentGravity * gravityMultiplier));
             }
             else if (currentRole.Value == PlayerRole.PlayerY)
             {
-                // Crisp, instant direct assignment (No Lerp!)
                 rb.linearVelocity = new Vector2(rb.linearVelocity.x, inputDirection * -moveSpeed);
                 rb.AddForce(new Vector2(currentGravity * gravityMultiplier, 0f));
             }
         }
         else 
         {
-            // If external force IS active, still apply our custom gravity so we don't float away!
             if (currentRole.Value == PlayerRole.PlayerX)
             {
                  rb.AddForce(new Vector2(0f, currentGravity * gravityMultiplier));
@@ -180,7 +245,7 @@ void FixedUpdate()
         }
     }
 
-    // --- STOLEN LOGIC: Public Methods for Bounce Pads / Hazards ---
+    
     public void SetExternalForce(float duration)
     {
         isExternalForceActive = true;
@@ -192,17 +257,12 @@ void FixedUpdate()
         isExternalForceActive = false;
     }
 
-    // --- NETWORKING METHODS ---
-
-    // A Client calls this to ask the Server to do something
     [ServerRpc]
     public void FlipGravityServerRpc()
     {
-        // The Server then shouts back to ALL clients to execute the flip
         FlipGravityClientRpc();
     }
 
-    // The Server calls this to force ALL Clients to run this code
     [ClientRpc]
     public void FlipGravityClientRpc()
     {
@@ -217,5 +277,46 @@ void FixedUpdate()
             Gizmos.color = Color.red;
             Gizmos.DrawWireSphere(groundCheck.position, groundCheckRadius);
         }
+    }
+
+    [ServerRpc]
+    public void TriggerRespawnEffectServerRpc()
+    {
+        FlashOnRespawnClientRpc();
+    }
+
+    [ClientRpc]
+    private void FlashOnRespawnClientRpc()
+    {
+        StartCoroutine(RespawnFlashRoutine());
+    }
+
+    private IEnumerator RespawnFlashRoutine()
+    {
+        SpriteRenderer sr = GetComponent<SpriteRenderer>();
+        
+        Color normalColor = (currentRole.Value == PlayerRole.PlayerX) ? Color.blue : Color.red;
+
+        for (int i = 0; i < 4; i++)
+        {
+            sr.color = Color.white;
+            yield return new WaitForSeconds(0.1f); 
+            
+            sr.color = normalColor;
+            yield return new WaitForSeconds(0.1f); 
+        }
+    }
+
+    // --- MANUAL RESPAWN LOGIC ---
+    
+    // --- MANUAL RESPAWN LOGIC ---
+    [ServerRpc]
+    public void RequestRespawnServerRpc()
+    {
+        // 1. Add a death to the shared counter
+        deathCount.Value++;
+
+        // 2. Trigger the visual flash effect for everyone to see
+        FlashOnRespawnClientRpc();
     }
 }

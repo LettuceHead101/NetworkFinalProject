@@ -20,18 +20,20 @@ public class KillZone : MonoBehaviour
         // 1. Did a Player hit us?
         if (target.CompareTag("Player"))
         {
-
-            Debug.Log("I was killed by the invisible object named: " + this.gameObject.name);
+            // uncomment to check what object killed the player in console for debug 
+            // Debug.Log("I was killed by the invisible object named: " + this.gameObject.name);
 
             PlayerController player = target.GetComponent<PlayerController>();
-
-            
 
             // 2. Are we the computer that controls this player?
             // (If we don't check this, both computers will try to teleport the player at the same time!)
             if (player != null && player.IsOwner)
             {
+                // count the death
                 player.AddDeathServerRpc();
+
+                // trigger the flashing effect over the network 
+                player.TriggerRespawnEffectServerRpc();
 
                 // 3. Stop all falling momentum so they don't slide upon respawning
                 Rigidbody2D rb = target.GetComponent<Rigidbody2D>();
