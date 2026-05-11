@@ -90,9 +90,13 @@ public class PlayerController : NetworkBehaviour
     // This triggers automatically every single time a new level finishes loading
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
+
+        // If we are on the win screen, do absolutely nothing! ---
+        if (scene.name == "Completion") return;
+
         AttachCamera();
 
-        // --- NEW: Teleport to spawn immediately when the scene loads ---
+        // Teleport to spawn immediately when the scene loads ---
         if (IsOwner)
         {
             // 1. Kill any momentum from the last level so they don't slide
